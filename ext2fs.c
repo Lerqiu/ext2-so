@@ -234,20 +234,19 @@ int ext2_inode_used(uint32_t ino) {
  * Returns 0 on success. If i-node is not allocated returns ENOENT. */
 static int ext2_inode_read(off_t ino, ext2_inode_t *inode) {
 #ifdef STUDENT
-  if (ext2_inode_used(ino) == 1) {
-    size_t gd_index = (ino - 1) / inodes_per_group;
-    size_t b_inGroup = (ino - 1) % inodes_per_group;
-    size_t tableOffset = (b_inGroup) / (BLKSIZE / 128);
+  if (!ext2_inode_used(ino))
+    return ENOENT;
 
-    blk_t *blk = blk_get(0, group_desc[gd_index].gd_i_tables + tableOffset);
-    void *addrInBlock = (void *)(((b_inGroup) % (BLKSIZE / 128)) * 128 +
-                                 (uint8_t *)(blk->b_data));
+  size_t gd_index = (ino - 1) / inodes_per_group;
+  size_t b_inGroup = (ino - 1) % inodes_per_group;
+  size_t tableOffset = (b_inGroup) / (BLKSIZE / 128);
 
-    memcpy(inode, addrInBlock, 128);
-    blk_put(blk);
-    return 0;
-  }
-  return ENOENT;
+  blk_t *blk = blk_get(0, group_desc[gd_index].gd_i_tables + tableOffset);
+  void *addrInBlock =
+    (void *)(((b_inGroup) % (BLKSIZE / 128)) * 128 + (uint8_t *)(blk->b_data));
+
+  memcpy(inode, addrInBlock, 128);
+  blk_put(blk);
 #endif /* !STUDENT */
   return 0;
 }
@@ -279,42 +278,38 @@ long ext2_blkaddr_read(uint32_t ino, uint32_t blkidx) {
   size_t r_inBlock = BLKSIZE / 4;
   if (blkidx < 12)
     return inode.i_blocks[blkidx];
+  blkidx -= 12;
 
-  if (blkidx < 12 + r_inBlock) {
+  if (blkidx < r_inBlock) {
     if (inode.i_blocks[12] == 0)
       return 0;
-    return ext2_blkptr_read(inode.i_blocks[12], blkidx - 12);
+    return ext2_blkptr_read(inode.i_blocks[12], blkidx);
   }
+  blkidx -= r_inBlock;
 
-  if (blkidx < 12 + r_inBlock + r_inBlock * r_inBlock) {
+  if (blkidx < r_inBlock * r_inBlock) {
     if (inode.i_blocks[13] == 0)
       return 0;
-    uint32_t firstLayer = ext2_blkptr_read(
-      inode.i_blocks[13], (blkidx - 12 - r_inBlock) / r_inBlock);
+    uint32_t firstLayer =
+      ext2_blkptr_read(inode.i_blocks[13], blkidx / r_inBlock);
     if (firstLayer == 0)
       return 0;
-    uint32_t secondLayer =
-      ext2_blkptr_read(firstLayer, (blkidx - 12 - r_inBlock) % r_inBlock);
+    uint32_t secondLayer = ext2_blkptr_read(firstLayer, blkidx % r_inBlock);
     return secondLayer;
   }
+  blkidx -= r_inBlock * r_inBlock;
 
-  if (blkidx < 12 + r_inBlock + r_inBlock * r_inBlock +
-                 r_inBlock * r_inBlock * r_inBlock) {
+  if (blkidx < r_inBlock * r_inBlock * r_inBlock) {
     if (inode.i_blocks[14] == 0)
       return 0;
-    uint32_t firstLayer = ext2_blkptr_read(
-      inode.i_blocks[14], (blkidx - 12 - r_inBlock - r_inBlock * r_inBlock) /
-                            (r_inBlock * r_inBlock));
+    uint32_t firstLayer =
+      ext2_blkptr_read(inode.i_blocks[14], blkidx / (r_inBlock * r_inBlock));
     if (firstLayer == 0)
       return 0;
-    uint32_t secondLayer = ext2_blkptr_read(
-      firstLayer,
-      (blkidx - 12 - r_inBlock - r_inBlock * r_inBlock) / r_inBlock);
+    uint32_t secondLayer = ext2_blkptr_read(firstLayer, blkidx / r_inBlock);
     if (secondLayer == 0)
       return 0;
-    uint32_t thirdLayer = ext2_blkptr_read(
-      secondLayer,
-      (blkidx - 12 - r_inBlock - r_inBlock * r_inBlock) % r_inBlock);
+    uint32_t thirdLayer = ext2_blkptr_read(secondLayer, blkidx % r_inBlock);
     return thirdLayer;
   }
 #endif /* !STUDENT */
@@ -334,8 +329,8 @@ int ext2_read(uint32_t ino, void *data, size_t pos, size_t len) {
     if ((error = ext2_inode_read(ino, &inode)))
       return error;
 
-    uint32_t size = ((uint32_t)(inode.i_size_high) << 16) | inode.i_size;
-    if (size < pos + len)
+    uint32_t fileSize = ((uint32_t)(inode.i_size_high) << 16) | inode.i_size;
+    if (fileSize < pos + len)
       return EINVAL;
   }
 
@@ -377,8 +372,10 @@ int ext2_readdir(uint32_t ino, uint32_t *off_p, ext2_dirent_t *de) {
   int error;
   if ((error = ext2_inode_read(ino, &inode)))
     return error;
+
+  uint32_t fileSize = (((uint32_t)inode.i_size_high << 16) | inode.i_size);
   while (true) {
-    if ((((uint32_t)inode.i_size_high << 16) | inode.i_size) <= *off_p)
+    if (fileSize <= *off_p)
       return 0;
 
     if ((error = ext2_read(ino, de, *off_p, de_name_offset)))
